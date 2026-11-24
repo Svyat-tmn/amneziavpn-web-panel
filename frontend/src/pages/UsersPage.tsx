@@ -4,6 +4,7 @@ import {
 } from '../api';
 import { useCurrentUser } from '../auth';
 import { PROTOCOL_ICONS, protocolTitle } from '../protocols';
+import ExpiryDateField, { formatExpiryDate } from './server/ExpiryDateField';
 
 // Управление пользователями панели. Публичной регистрации нет: аккаунт здесь —
 // это доступ к VPN, поэтому пользователей заводит администратор и он же решает,
@@ -76,7 +77,8 @@ export default function UsersPage() {
                       : [
                           `протоколов выдано: ${u.protocolIds.length}`,
                           `клиентов: ${u.clients_count}${u.client_limit > 0 ? ` из ${u.client_limit}` : ' (без лимита)'}`,
-                          u.default_expiry_days > 0 ? `срок: ${u.default_expiry_days} дн.` : null,
+                          u.default_expiry_date ? `срок до ${formatExpiryDate(u.default_expiry_date)}`
+                            : u.default_expiry_days > 0 ? `срок: ${u.default_expiry_days} дн.` : null,
                           u.default_daily_limit_mb > 0 ? `трафик: ${u.default_daily_limit_mb} МБ/сут` : null,
                         ].filter(Boolean).join(' · ')}
                   </div>
@@ -131,7 +133,7 @@ function UserModal({ user, protocols, onClose, onSaved }: ModalProps) {
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>(user?.role ?? 'user');
   const [clientLimit, setClientLimit] = useState(String(user?.client_limit ?? 5));
-  const [expiryDays, setExpiryDays] = useState(String(user?.default_expiry_days ?? 0));
+  const [expiryDate, setExpiryDate] = useState<string | undefined>();
   const [dailyLimitMb, setDailyLimitMb] = useState(String(user?.default_daily_limit_mb ?? 0));
   const [granted, setGranted] = useState<string[]>(user?.protocolIds ?? []);
   const [loading, setLoading] = useState(false);
@@ -165,7 +167,7 @@ function UserModal({ user, protocols, onClose, onSaved }: ModalProps) {
       const common = {
         role,
         clientLimit: Number(clientLimit) || 0,
-        defaultExpiryDays: Number(expiryDays) || 0,
+        defaultExpiryDate: expiryDate === undefined ? undefined : expiryDate || null,
         defaultDailyLimitMb: Number(dailyLimitMb) || 0,
         protocolIds: granted,
       };
@@ -217,11 +219,8 @@ function UserModal({ user, protocols, onClose, onSaved }: ModalProps) {
                 value={clientLimit} onChange={e => setClientLimit(e.target.value)} />
             </div>
 
-            <div className="input-group">
-              <label className="input-label">Срок действия его клиентов, дней (0 — бессрочно)</label>
-              <input className="input input-mono" type="number" min={0} max={3650}
-                value={expiryDays} onChange={e => setExpiryDays(e.target.value)} />
-            </div>
+            <ExpiryDateField value={expiryDate ?? user?.default_expiry_date ?? ''} onChange={setExpiryDate}
+              legacyDays={expiryDate === undefined && !user?.default_expiry_date ? user?.default_expiry_days : undefined} />
 
             <div className="input-group">
               <label className="input-label">Суточный лимит трафика его клиентов, МБ (0 — без лимита)</label>

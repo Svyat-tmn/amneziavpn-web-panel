@@ -12,7 +12,7 @@ export default function AddClientModal({ protocolId, onClose, onAdded }: Props) 
   const [name, setName] = useState('');
   // Строками, а не числами: пустое поле в контролируемом number-input иначе
   // невозможно очистить.
-  const [expiresInDays, setExpiresInDays] = useState('0');
+  const [expiryDate, setExpiryDate] = useState('');
   const [dailyLimitMb, setDailyLimitMb] = useState('0');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -24,7 +24,7 @@ export default function AddClientModal({ protocolId, onClose, onAdded }: Props) 
     try {
       const r = await clientsApi.create({
         protocolId, name,
-        expiresInDays: Number(expiresInDays) || 0,
+        expiryDate: expiryDate || null,
         dailyLimitMb: Number(dailyLimitMb) || 0,
       });
       onAdded(r.data);
@@ -47,9 +47,9 @@ export default function AddClientModal({ protocolId, onClose, onAdded }: Props) 
         </div>
 
         <LimitFields
-          expiresInDays={expiresInDays}
+          expiryDate={expiryDate}
           dailyLimitMb={dailyLimitMb}
-          onExpiryChange={setExpiresInDays}
+          onExpiryChange={setExpiryDate}
           onLimitChange={setDailyLimitMb}
         />
 

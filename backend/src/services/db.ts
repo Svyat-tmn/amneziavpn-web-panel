@@ -50,6 +50,8 @@ export async function getDb(): Promise<Db> {
   // поведение уже написанного кода (он удаляет связанные строки вручную).
 
   initSchema();
+  addColumnIfMissing('users', 'default_expiry_date', 'default_expiry_date TEXT');
+  addColumnIfMissing('clients', 'peer_restore', 'peer_restore TEXT');
   addColumnIfMissing('servers', 'host_fingerprint', 'host_fingerprint TEXT');
   migrateEncryption();
   migrateClientPeerIds();

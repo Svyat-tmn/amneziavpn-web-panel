@@ -12,6 +12,11 @@
 
 import { exec, execSudo } from '../ssh.js';
 import { sh } from '../shell.js';
+import { isIPv4 } from 'node:net';
+import { randomUUID } from 'node:crypto';
+import { query } from '../db.js';
+import { decrypt } from '../crypto.js';
+import { extractPeerRestoreInfo, type PeerRestoreInfo } from '../peerId.js';
 import {
   writeRemoteFile, readRemoteFile, buildImage, assertPortFree, removePeerBlock, runContainer,
 } from './common.js';
@@ -135,41 +140,101 @@ export async function genPeerKeys(server: Server, f: WgFlavor): Promise<PeerKeys
   return { clientPrivKey, clientPubKey: pubRes.stdout.trim() };
 }
 
-// Следующий свободный адрес в подсети: считаем существующих пиров и берём +2
-// (первый адрес занимает сам сервер).
-export async function nextClientIp(server: Server, f: WgFlavor, subnetPrefix: string): Promise<string> {
-  const peersRes = await execSudo(server, `docker exec ${f.containerName} ${f.tool} show ${f.iface} peers 2>/dev/null | wc -l`);
-  const peerCount = parseInt(peersRes.stdout.trim()) || 0;
-  return `${subnetPrefix}.${peerCount + 2}`;
+// Учитываем адреса активных и приостановленных клиентов.
+async function activePeerAddresses(server: Server, f: WgFlavor): Promise<string> {
+  const result = await execSudo(server, `docker exec ${f.containerName} ${f.tool} show ${f.iface} allowed-ips`);
+  if (result.code !== 0) throw new UserError(`Не удалось прочитать адреса пиров ${f.label}`);
+  return result.stdout;
 }
 
-// Добавляет пира в живой интерфейс и дописывает [Peer] в конфиг на диске.
-// PSK передаётся во временный файл: в аргументах команды он остался бы в ps.
-export async function addPeer(
+export async function nextClientIp(server: Server, f: WgFlavor, subnetPrefix: string, protocolId: string): Promise<string> {
+  const addresses = new Set((await activePeerAddresses(server, f)).match(/\b\d+\.\d+\.\d+\.\d+(?=\/)/g) ?? []);
+  const rows = query<{ config: string | null; peer_restore: string | null }>(
+    'SELECT config, peer_restore FROM clients WHERE protocol_id = ?', [protocolId],
+  );
+  for (const row of rows) {
+    const saved = decrypt(row.peer_restore);
+    const info: PeerRestoreInfo | null = saved ? JSON.parse(saved) : extractPeerRestoreInfo(row.config, 'wireguard');
+    if (info?.clientIp) addresses.add(info.clientIp);
+  }
+  for (let host = 2; host < 255; host++) {
+    const candidate = `${subnetPrefix}.${host}`;
+    if (!addresses.has(candidate)) return candidate;
+  }
+  throw new UserError(`В подсети ${f.label} закончились свободные адреса`);
+}
+
+async function readPeerConfig(server: Server, f: WgFlavor): Promise<string> {
+  const result = await execSudo(server, `docker exec ${f.containerName} cat ${confPath(f)}`);
+  if (result.code !== 0 || !result.stdout.trim()) throw new UserError(`Не удалось прочитать конфигурацию ${f.label}`);
+  return result.stdout;
+}
+
+async function writePeerConfig(server: Server, f: WgFlavor, config: string): Promise<void> {
+  const data = Buffer.from(config).toString('base64');
+  const path = confPath(f);
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  const write = `umask 077; base64 -d > ${tmp} && mv -f ${tmp} ${path}; status=$?; rm -f ${tmp}; exit $status`;
+  const result = await execSudo(server, `printf '%s' '${data}' | docker exec -i ${f.containerName} sh -c ${sh(write)}`);
+  if (result.code !== 0) throw new UserError(`Не удалось сохранить конфигурацию ${f.label}`);
+}
+
+const peerWrites = new Map<string, Promise<void>>();
+
+async function updatePeers(server: Server, f: WgFlavor, update: () => Promise<void>): Promise<void> {
+  const key = `${server.id}:${f.containerName}`;
+  const next = (peerWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(update);
+  peerWrites.set(key, next);
+  try {
+    await next;
+  } finally {
+    if (peerWrites.get(key) === next) peerWrites.delete(key);
+  }
+}
+
+// Добавляет пира в живой интерфейс и заменяет его блок [Peer] в конфиге.
+export function addPeer(
   server: Server, f: WgFlavor,
   peer: { clientPubKey: string; presharedKey: string; clientIp: string },
 ): Promise<void> {
-  const pskTmp = `/tmp/.psk_${Date.now()}`;
-  const pskB64 = Buffer.from(peer.presharedKey, 'utf8').toString('base64');
-  await execSudo(server, `docker exec ${f.containerName} sh -c "echo '${pskB64}' | base64 -d > ${pskTmp}"`);
+  return updatePeers(server, f, () => addPeerUnlocked(server, f, peer));
+}
 
-  const addPeerRes = await execSudo(server,
-    `docker exec ${f.containerName} sh -c "${f.tool} set ${f.iface} peer ${peer.clientPubKey} preshared-key ${pskTmp} allowed-ips ${peer.clientIp}/32 && rm -f ${pskTmp}"`);
+async function addPeerUnlocked(
+  server: Server, f: WgFlavor,
+  peer: { clientPubKey: string; presharedKey: string; clientIp: string },
+): Promise<void> {
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(peer.clientPubKey) || !isIPv4(peer.clientIp)) {
+    throw new UserError(`Некорректный ключ или адрес пира ${f.label}`);
+  }
+  const address = `${peer.clientIp}/32`;
+  const occupied = (await activePeerAddresses(server, f)).split('\n').some(line => {
+    const [key, ...ips] = line.trim().split(/\s+/);
+    return key !== peer.clientPubKey && ips.join(' ').split(/[,\s]+/).includes(address);
+  });
+  if (occupied) throw new UserError(`Адрес ${peer.clientIp} уже назначен другому пиру ${f.label}`);
+  const conf = await readPeerConfig(server, f);
+  const pskTmp = `/tmp/.psk_${randomUUID()}`;
+  const pskB64 = Buffer.from(peer.presharedKey, 'utf8').toString('base64');
+  const set = `umask 077; printf '%s' '${pskB64}' | base64 -d > ${pskTmp} &&
+    ${f.tool} set ${f.iface} peer ${peer.clientPubKey} preshared-key ${pskTmp} allowed-ips ${address};
+    status=$?; rm -f ${pskTmp}; exit $status`;
+  const addPeerRes = await execSudo(server, `docker exec ${f.containerName} sh -c ${sh(set)}`);
   if (addPeerRes.code !== 0) {
     throw new UserError(`Failed to add ${f.label} peer: ${addPeerRes.stderr || addPeerRes.stdout}`);
   }
 
-  const peerEntry = Buffer.from(
-    `\n[Peer]\nPublicKey = ${peer.clientPubKey}\nPresharedKey = ${peer.presharedKey}\nAllowedIPs = ${peer.clientIp}/32\n`,
-  ).toString('base64');
-  await execSudo(server, `echo '${peerEntry}' | base64 -d | docker exec -i ${f.containerName} tee -a ${confPath(f)} > /dev/null`);
+  const entry = `\n[Peer]\nPublicKey = ${peer.clientPubKey}\nPresharedKey = ${peer.presharedKey}\nAllowedIPs = ${address}\n`;
+  await writePeerConfig(server, f, removePeerBlock(conf, peer.clientPubKey).trimEnd() + '\n' + entry);
 }
 
 // Отзыв клиента: убираем пира из живого интерфейса и из конфига (peerId = pubkey).
-export async function removePeer(server: Server, f: WgFlavor, peerId: string): Promise<void> {
-  await execSudo(server, `docker exec ${f.containerName} ${f.tool} set ${f.iface} peer ${sh(peerId)} remove 2>/dev/null || true`);
-  const conf = await readRemoteFile(server, confPath(f));
-  if (conf) {
-    await writeRemoteFile(server, confPath(f), removePeerBlock(conf, peerId));
-  }
+export function removePeer(server: Server, f: WgFlavor, peerId: string): Promise<void> {
+  return updatePeers(server, f, async () => {
+    const conf = await readPeerConfig(server, f);
+    const result = await execSudo(server, `docker exec ${f.containerName} ${f.tool} set ${f.iface} peer ${sh(peerId)} remove`);
+    if (result.code !== 0) throw new UserError(`Не удалось отключить пира ${f.label}`);
+    const updated = removePeerBlock(conf, peerId);
+    if (updated !== conf) await writePeerConfig(server, f, updated);
+  });
 }

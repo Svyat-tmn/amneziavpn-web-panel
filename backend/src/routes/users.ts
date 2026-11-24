@@ -11,6 +11,7 @@ import { authMiddleware, requireAdmin } from '../middleware/auth.js';
 import { validateBody } from '../middleware/validate.js';
 import { grantedProtocolIds, setUserProtocols, revokeUserGrants } from '../services/access.js';
 import { auditTarget, auditDetails } from '../middleware/audit.js';
+import { expiryDateSchema } from '../services/expiry.js';
 import type { AppUser, UserRole } from '../types.js';
 
 const router = Router();
@@ -24,6 +25,7 @@ const createSchema = z.object({
   clientLimit: z.coerce.number().int().min(0).max(1000).optional().default(5),
   // Лимиты, которые получат клиенты этого пользователя. 0 = без ограничения.
   defaultExpiryDays: z.coerce.number().int().min(0).max(3650).optional().default(0),
+  defaultExpiryDate: expiryDateSchema,
   defaultDailyLimitMb: z.coerce.number().int().min(0).max(1024 * 1024).optional().default(0),
   protocolIds: z.array(z.string()).optional().default([]),
 });
@@ -34,6 +36,7 @@ const updateSchema = z.object({
   role: z.enum(['admin', 'user']).optional(),
   clientLimit: z.coerce.number().int().min(0).max(1000).optional(),
   defaultExpiryDays: z.coerce.number().int().min(0).max(3650).optional(),
+  defaultExpiryDate: expiryDateSchema,
   defaultDailyLimitMb: z.coerce.number().int().min(0).max(1024 * 1024).optional(),
   protocolIds: z.array(z.string()).optional(),
 });
@@ -44,6 +47,7 @@ interface UserRow {
   role: UserRole;
   client_limit: number;
   default_expiry_days: number;
+  default_expiry_date: string | null;
   default_daily_limit_mb: number;
   created_at: string;
   clients_count: number;
@@ -52,7 +56,7 @@ interface UserRow {
 function listUsers(): Array<UserRow & { protocolIds: string[] }> {
   const rows = query<UserRow>(`
     SELECT u.id, u.username, u.role, u.client_limit, u.created_at,
-           u.default_expiry_days, u.default_daily_limit_mb,
+           u.default_expiry_days, u.default_expiry_date, u.default_daily_limit_mb,
            (SELECT COUNT(*) FROM clients c WHERE c.user_id = u.id) AS clients_count
     FROM users u
     ORDER BY u.created_at ASC
@@ -70,7 +74,7 @@ router.get('/', (_req, res) => res.json(listUsers()));
 // POST /api/users — завести пользователя
 router.post('/', validateBody(createSchema), async (req: Request, res: Response) => {
   const {
-    username, password, role, clientLimit, defaultExpiryDays, defaultDailyLimitMb, protocolIds,
+    username, password, role, clientLimit, defaultExpiryDays, defaultExpiryDate, defaultDailyLimitMb, protocolIds,
   } = req.body as z.infer<typeof createSchema>;
 
   if (queryOne('SELECT id FROM users WHERE username = ?', [username])) {
@@ -79,13 +83,14 @@ router.post('/', validateBody(createSchema), async (req: Request, res: Response)
 
   const id = uuidv4();
   const hash = await bcrypt.hash(password, 10);
-  run(`INSERT INTO users (id, username, password_hash, role, client_limit, default_expiry_days, default_daily_limit_mb)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [id, username, hash, role, clientLimit, defaultExpiryDays, defaultDailyLimitMb]);
+  run(`INSERT INTO users (id, username, password_hash, role, client_limit, default_expiry_days, default_expiry_date, default_daily_limit_mb)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, username, hash, role, clientLimit, defaultExpiryDate === undefined ? defaultExpiryDays : 0,
+      defaultExpiryDate ?? null, defaultDailyLimitMb]);
   setUserProtocols(id, protocolIds);
 
   auditTarget(req, { id, name: username });
-  auditDetails(req, { role, clientLimit, defaultExpiryDays, defaultDailyLimitMb, protocols: protocolIds.length });
+  auditDetails(req, { role, clientLimit, defaultExpiryDays, defaultExpiryDate, defaultDailyLimitMb, protocols: protocolIds.length });
 
   const created = listUsers().find(u => u.id === id);
   res.json(created);
@@ -98,7 +103,7 @@ router.put('/:id', validateBody(updateSchema), async (req: Request, res: Respons
   auditTarget(req, { id: target.id, name: target.username });
 
   const {
-    password, role, clientLimit, defaultExpiryDays, defaultDailyLimitMb, protocolIds,
+    password, role, clientLimit, defaultExpiryDays, defaultExpiryDate, defaultDailyLimitMb, protocolIds,
   } = req.body as z.infer<typeof updateSchema>;
 
   // Что именно поменяли. Сам пароль в журнал, разумеется, не попадает.
@@ -107,6 +112,7 @@ router.put('/:id', validateBody(updateSchema), async (req: Request, res: Respons
     ...(role !== undefined ? { role } : {}),
     ...(clientLimit !== undefined ? { clientLimit } : {}),
     ...(defaultExpiryDays !== undefined ? { defaultExpiryDays } : {}),
+    ...(defaultExpiryDate !== undefined ? { defaultExpiryDate } : {}),
     ...(defaultDailyLimitMb !== undefined ? { defaultDailyLimitMb } : {}),
     ...(protocolIds !== undefined ? { protocols: protocolIds.length } : {}),
   });
@@ -126,8 +132,9 @@ router.put('/:id', validateBody(updateSchema), async (req: Request, res: Respons
   // Дефолты действуют на клиентов, которые пользователь заведёт ПОСЛЕ правки.
   // Уже выпущенные не трогаем: менять их задним числом — это молча обрезать
   // человеку работающий доступ. Для них есть PUT /api/clients/:id/limits.
-  if (defaultExpiryDays !== undefined) {
-    run('UPDATE users SET default_expiry_days = ? WHERE id = ?', [defaultExpiryDays, target.id]);
+  if (defaultExpiryDate !== undefined || defaultExpiryDays !== undefined) {
+    run('UPDATE users SET default_expiry_days = ?, default_expiry_date = ? WHERE id = ?',
+      [defaultExpiryDate === undefined ? defaultExpiryDays ?? 0 : 0, defaultExpiryDate ?? null, target.id]);
   }
   if (defaultDailyLimitMb !== undefined) {
     run('UPDATE users SET default_daily_limit_mb = ? WHERE id = ?', [defaultDailyLimitMb, target.id]);

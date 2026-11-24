@@ -319,7 +319,7 @@ export async function addAWG2Client(server: Server, protocol: Protocol, _clientN
     throw new UserError('Failed to generate AmneziaWG PSK: empty output');
   }
 
-  const clientIp = await nextClientIp(server, AWG2_FLAVOR, SUBNET_PREFIX);
+  const clientIp = await nextClientIp(server, AWG2_FLAVOR, SUBNET_PREFIX, protocol.id);
   await addPeer(server, AWG2_FLAVOR, { clientPubKey, presharedKey, clientIp });
 
   const clientDns = await resolveClientDns(server);

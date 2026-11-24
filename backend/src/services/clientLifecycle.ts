@@ -8,9 +8,13 @@ import {
   removeAWG2Client, removeXrayClient, removeWireGuardClient, removeTelemtClient,
   restoreAWG2Client, restoreXrayClient, restoreWireGuardClient, restoreTelemtClient,
 } from './protocols/index.js';
-import { extractPeerRestoreInfo } from './peerId.js';
+import { extractPeerRestoreInfo, type PeerRestoreInfo } from './peerId.js';
 import { deleteSubscription } from './subscription.js';
 import { UserError } from './errors.js';
+import { decrypt, encrypt } from './crypto.js';
+import { readContainerFile } from './protocols/common.js';
+import { assertContainerName } from './shell.js';
+import { isIPv4 } from 'node:net';
 import type { Client, Protocol, Server } from '../types.js';
 
 export interface ClientContext {
@@ -50,7 +54,8 @@ export async function restorePeer(ctx: ClientContext): Promise<void> {
     throw new UserError('Не хватает данных для возврата клиента на сервер (протокол или сервер удалены)');
   }
 
-  const info = extractPeerRestoreInfo(client.config ?? null, protocol.type);
+  const stored = decrypt(client.peer_restore);
+  const info: PeerRestoreInfo | null = stored ? JSON.parse(stored) : extractPeerRestoreInfo(client.config ?? null, protocol.type);
   if (!info) {
     throw new UserError('В сохранённом конфиге клиента нет данных для восстановления');
   }
@@ -84,18 +89,51 @@ export function purgeClientRows(clientId: string): void {
   run('DELETE FROM clients WHERE id = ?', [clientId]);
 }
 
-// Полное удаление: сначала сервер, потом база. Порядок важен — см. revokePeer.
-export async function deleteClientCompletely(client: Client): Promise<void> {
-  await revokePeer(loadClientContext(client));
-  purgeClientRows(client.id);
+async function saveImportedPeer(ctx: ClientContext): Promise<void> {
+  const { client, protocol, server } = ctx;
+  if (!protocol || !server || !client.peer_id) throw new UserError('Не хватает данных для приостановки клиента');
+  if (client.peer_restore || extractPeerRestoreInfo(client.config ?? null, protocol.type)) return;
+
+  assertContainerName(protocol.container_name);
+  let info: PeerRestoreInfo | undefined;
+  if (protocol.type === 'awg2' || protocol.type === 'wireguard') {
+    const path = protocol.type === 'awg2' ? '/opt/amnezia/awg/awg0.conf' : '/opt/amnezia/wireguard/wg0.conf';
+    const config = await readContainerFile(server, protocol.container_name, path);
+    for (const block of config.split(/^\s*\[Peer\][ \t]*$/im).slice(1)) {
+      const field = (key: string) => block.match(new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*([^\\r\\n#]+)`, 'im'))?.[1].trim();
+      if (field('PublicKey') !== client.peer_id) continue;
+      const allowed = field('AllowedIPs');
+      const ip = allowed?.replace(/\/32$/, '');
+      const psk = field('PresharedKey');
+      const fields = [...block.matchAll(/^[ \t]*([A-Za-z]+)[ \t]*=/gm)].map(match => match[1].toLowerCase());
+      const restorable = fields.every(key => ['publickey', 'allowedips', 'presharedkey'].includes(key));
+      if (restorable && ip && allowed === `${ip}/32` && isIPv4(ip) && psk && /^[A-Za-z0-9+/]{43}=$/.test(psk)) {
+        info = { clientIp: ip, presharedKey: psk };
+      }
+      break;
+    }
+  } else if (protocol.type === 'telemt') {
+    const users = await readContainerFile(server, protocol.container_name, '/opt/amnezia/telemt/users');
+    for (const line of users.split('\n')) {
+      const match = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*"([0-9a-fA-F]{32})"\s*$/);
+      if (match?.[1] === client.peer_id && /^c_[0-9a-f]{12}$/i.test(client.peer_id)) {
+        info = { secret: match[2] };
+        break;
+      }
+    }
+  }
+  if (!info) throw new UserError('Не удалось сохранить данные для восстановления импортированного клиента');
+  run('UPDATE clients SET peer_restore = ? WHERE id = ?', [encrypt(JSON.stringify(info)), client.id]);
 }
 
 export async function suspendClient(client: Client): Promise<void> {
-  await revokePeer(loadClientContext(client));
+  const ctx = loadClientContext(client);
+  await saveImportedPeer(ctx);
+  await revokePeer(ctx);
   run('UPDATE clients SET suspended_at = ? WHERE id = ?', [Math.floor(Date.now() / 1000), client.id]);
 }
 
 export async function resumeClient(client: Client): Promise<void> {
   await restorePeer(loadClientContext(client));
-  run('UPDATE clients SET suspended_at = NULL WHERE id = ?', [client.id]);
+  run('UPDATE clients SET suspended_at = NULL, peer_restore = NULL WHERE id = ?', [client.id]);
 }

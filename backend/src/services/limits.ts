@@ -1,7 +1,6 @@
 // Лимиты клиента: срок действия и суточный трафик.
 //
-// Срок действия — жёсткий: по истечении клиент удаляется вместе с пиром на
-// сервере, как если бы его удалили руками.
+// По истечении срока доступ приостанавливается до продления.
 //
 // Суточный трафик — мягкий: при исчерпании пир снимается с сервера
 // (приостановка), а с началом новых суток возвращается тем же ключом. Удалять
@@ -13,7 +12,7 @@
 // последнего снимка ДО полуночи (он и есть база отсчёта).
 import { query, queryOne } from './db.js';
 import { sumTraffic } from './statsAggregate.js';
-import { deleteClientCompletely, suspendClient, resumeClient } from './clientLifecycle.js';
+import { suspendClient, resumeClient } from './clientLifecycle.js';
 import { logger } from './logger.js';
 import type { Client } from '../types.js';
 
@@ -70,12 +69,30 @@ interface LimitedClient extends Client {
 // Приведение одного клиента к его лимитам. Тем же вызовом пользуется роут
 // смены лимитов: подняли суточный порог — приостановка снимается сразу, а не
 // на следующем тике воркера.
+const pendingChecks = new Map<string, Promise<void>>();
+
 export async function enforceLimitsForClient(
-  client: Client, nowSec: number = Math.floor(Date.now() / 1000),
+  { id }: Client, nowSec: number = Math.floor(Date.now() / 1000),
 ): Promise<void> {
+  const previous = pendingChecks.get(id) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(async () => {
+    const current = queryOne<Client>('SELECT * FROM clients WHERE id = ?', [id]);
+    if (current) await applyLimits(current, nowSec);
+  });
+  pendingChecks.set(id, next);
+  try {
+    await next;
+  } finally {
+    if (pendingChecks.get(id) === next) pendingChecks.delete(id);
+  }
+}
+
+async function applyLimits(client: Client, nowSec: number): Promise<void> {
   if (isExpired(client, nowSec)) {
-    await deleteClientCompletely(client);
-    logger.info({ client: client.id, name: client.name }, 'client expired and removed');
+    if (!client.suspended_at) {
+      await suspendClient(client);
+      logger.info({ client: client.id }, 'client suspended: access expired');
+    }
     return;
   }
 

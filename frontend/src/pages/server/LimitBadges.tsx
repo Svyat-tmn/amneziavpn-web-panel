@@ -22,6 +22,7 @@ interface Props extends ClientLimits {
 
 export default function LimitBadges({ expires_at, daily_limit_bytes, suspended_at, used_today, compact }: Props) {
   const expiry = formatExpiry(expires_at);
+  const expired = !!expires_at && expires_at <= Date.now() / 1000;
   const hasTraffic = daily_limit_bytes > 0;
   if (!expiry && !hasTraffic && !suspended_at) return null;
 
@@ -30,17 +31,22 @@ export default function LimitBadges({ expires_at, daily_limit_bytes, suspended_a
 
   return (
     <span className="mono" style={{ display: 'inline-flex', gap: 8, alignItems: 'center', fontSize, flexWrap: 'wrap' }}>
-      {suspended_at && (
+      {expired && (
+        <span className="badge badge-stopped" title="Доступ истёк. Конфиг сохраняется для продления.">
+          {suspended_at ? 'Неактивен · срок истёк' : 'Срок истёк · ожидает отключения'}
+        </span>
+      )}
+      {suspended_at && !expired && (
         <span
           className="badge badge-stopped"
           title="Суточный лимит трафика исчерпан. Доступ вернётся автоматически с началом новых суток — конфиг менять не нужно."
           style={{ cursor: 'help' }}
         >⏸ лимит</span>
       )}
-      {expiry && (
+      {expiry && !expired && (
         <span
           style={{ color: expiry.soon ? 'var(--danger, #e5534b)' : 'var(--text-muted)' }}
-          title={`Клиент будет удалён ${new Date(expires_at! * 1000).toLocaleString('ru-RU')}`}
+          title={`Доступ истекает ${new Date(expires_at! * 1000).toLocaleString('ru-RU')}`}
         >⏳ {expiry.text}</span>
       )}
       {hasTraffic && (

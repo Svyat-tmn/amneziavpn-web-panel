@@ -405,12 +405,8 @@ export async function restoreXrayClient(server: Server, protocol: Protocol, peer
 export async function removeXrayClient(server: Server, protocol: Protocol, peerId: string): Promise<void> {
   assertContainerName(protocol.container_name);
   const cn = protocol.container_name;
-  const confRaw = await readContainerFile(server, cn, '/opt/amnezia/xray/server.json');
-  if (!confRaw) return;
-  let serverJson: any;
-  try { serverJson = JSON.parse(confRaw); } catch { return; }
-  const vlessInbound = serverJson.inbounds?.find((i: any) => i.protocol === 'vless');
-  if (!vlessInbound?.settings?.clients) return;
+  const serverJson = await readServerJson(server, cn);
+  const vlessInbound = vlessInboundOf(serverJson);
   const before = vlessInbound.settings.clients.length;
   vlessInbound.settings.clients = vlessInbound.settings.clients.filter((c: any) => c.id !== peerId);
   if (vlessInbound.settings.clients.length === before) return; // нечего удалять

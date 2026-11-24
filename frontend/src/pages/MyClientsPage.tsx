@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { formatExpiryDate } from './server/ExpiryDateField';
 import {
   clientsApi, type MyClientRecord, type AvailableProtocol,
 } from '../api';
@@ -176,6 +177,7 @@ export default function MyClientsPage() {
         <AddMyClientModal
           protocols={protocols}
           expiryDays={me.defaultExpiryDays}
+          expiryDate={me.defaultExpiryDate}
           dailyLimitMb={me.defaultDailyLimitMb}
           onClose={() => setShowAdd(false)}
           onAdded={c => { setClients(prev => [c, ...prev]); setShowAdd(false); }}
@@ -213,12 +215,13 @@ interface AddProps {
   protocols: AvailableProtocol[];
   /** Лимиты, заданные администратором для этого пользователя. Только показ. */
   expiryDays: number;
+  expiryDate: string | null;
   dailyLimitMb: number;
   onClose: () => void;
   onAdded: (client: MyClientRecord) => void;
 }
 
-function AddMyClientModal({ protocols, expiryDays, dailyLimitMb, onClose, onAdded }: AddProps) {
+function AddMyClientModal({ protocols, expiryDays, expiryDate, dailyLimitMb, onClose, onAdded }: AddProps) {
   const [name, setName] = useState('');
   const [protocolId, setProtocolId] = useState(protocols[0]?.id ?? '');
   const [loading, setLoading] = useState(false);
@@ -284,11 +287,12 @@ function AddMyClientModal({ protocols, expiryDays, dailyLimitMb, onClose, onAdde
             onKeyDown={e => e.key === 'Enter' && submit()} autoFocus />
         </div>
 
-        {(expiryDays > 0 || dailyLimitMb > 0) && (
+        {(expiryDate || expiryDays > 0 || dailyLimitMb > 0) && (
           <div className="notice" style={{ marginBottom: 12, fontSize: 12 }}>
             Ограничения, заданные администратором:
             <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
-              {expiryDays > 0 && <li>срок действия — {expiryDays} дн., затем клиент удаляется</li>}
+              {expiryDate && <li>доступ до {formatExpiryDate(expiryDate)} включительно</li>}
+              {!expiryDate && expiryDays > 0 && <li>доступ на {expiryDays} дн., затем приостановка</li>}
               {dailyLimitMb > 0 && (
                 <li>не более {dailyLimitMb} МБ в сутки; при исчерпании доступ приостановится до начала новых суток</li>
               )}

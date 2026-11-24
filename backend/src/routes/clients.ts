@@ -16,6 +16,7 @@ import {
 } from '../services/protocols/index.js';
 import { loadClientContext, revokePeer, purgeClientRows } from '../services/clientLifecycle.js';
 import { usedToday, enforceLimitsForClient } from '../services/limits.js';
+import { expiryCalendarDate, expiryDateSchema, expiryTimestamp } from '../services/expiry.js';
 import { clientTrafficSince, lastHandshakes, isOnline } from '../services/dashboard.js';
 import { createSubscription, getVpsHost } from '../services/subscription.js';
 import { buildAmneziaExportJson, buildVpnUri, buildChunkedAmneziaQr } from '../services/amneziaExport.js';
@@ -34,11 +35,13 @@ const createClientSchema = z.object({
   // Лимиты задаёт админ. Обычному пользователю их подставляют из его учётки:
   // ограничение, которое можно выбрать самому, ничего не ограничивает.
   expiresInDays: z.coerce.number().int().min(0).max(3650).optional(),
+  expiryDate: expiryDateSchema,
   dailyLimitMb: z.coerce.number().int().min(0).max(1024 * 1024).optional(),
 });
 
 const limitsSchema = z.object({
   expiresInDays: z.coerce.number().int().min(0).max(3650).optional(),
+  expiryDate: expiryDateSchema,
   dailyLimitMb: z.coerce.number().int().min(0).max(1024 * 1024).optional(),
 });
 
@@ -54,6 +57,7 @@ const MB = 1024 * 1024;
 function limitFields(client: Client): Record<string, unknown> {
   return {
     expires_at: client.expires_at ?? null,
+    expires_on: expiryCalendarDate(client.expires_at),
     daily_limit_bytes: client.daily_limit_bytes ?? 0,
     suspended_at: client.suspended_at ?? null,
     used_today: usedToday(client.id),
@@ -175,7 +179,7 @@ router.get('/protocol/:protocolId', (req, res) => {
 });
 
 router.post('/', validateBody(createClientSchema), async (req: Request, res: Response) => {
-  const { protocolId, name, expiresInDays, dailyLimitMb } = req.body as z.infer<typeof createClientSchema>;
+  const { protocolId, name, expiresInDays, expiryDate, dailyLimitMb } = req.body as z.infer<typeof createClientSchema>;
   const protocol = queryOne<Protocol>('SELECT * FROM protocols WHERE id = ?', [protocolId]);
   if (!protocol) return res.status(404).json({ error: 'Protocol not found' });
 
@@ -196,8 +200,8 @@ router.post('/', validateBody(createClientSchema), async (req: Request, res: Res
 
   // Лимиты. Админ задаёт их прямо в запросе; обычному пользователю они берутся
   // из его учётки — иначе ограничение обходилось бы простым «не указывать».
-  const defaults = queryOne<{ default_expiry_days: number; default_daily_limit_mb: number }>(
-    'SELECT default_expiry_days, default_daily_limit_mb FROM users WHERE id = ?', [req.user!.id],
+  const defaults = queryOne<{ default_expiry_days: number; default_expiry_date: string | null; default_daily_limit_mb: number }>(
+    'SELECT default_expiry_days, default_expiry_date, default_daily_limit_mb FROM users WHERE id = ?', [req.user!.id],
   );
   const days = isAdmin(req.user!)
     ? (expiresInDays ?? 0)
@@ -206,7 +210,11 @@ router.post('/', validateBody(createClientSchema), async (req: Request, res: Res
     ? (dailyLimitMb ?? 0)
     : (defaults?.default_daily_limit_mb ?? 0);
 
-  const expiresAt = days > 0 ? Math.floor(Date.now() / 1000) + days * 24 * 60 * 60 : null;
+  const date = isAdmin(req.user!) ? expiryDate : defaults?.default_expiry_date ?? undefined;
+  const expiresAt = expiryTimestamp(date, days);
+  if (expiresAt !== null && expiresAt <= Date.now() / 1000) {
+    return res.status(400).json({ error: 'Срок действия уже истёк. Укажите новую дату перед выпуском клиента.' });
+  }
   const dailyLimitBytes = limitMb > 0 ? limitMb * MB : 0;
 
   let result;
@@ -237,14 +245,15 @@ router.post('/', validateBody(createClientSchema), async (req: Request, res: Res
   auditTarget(req, { id, name: safeName });
   auditDetails(req, {
     protocol: protocol.type, server: server.name,
-    expiresInDays: days || null, dailyLimitMb: limitMb || null,
+    expiresAt, dailyLimitMb: limitMb || null,
   });
 
   const created = queryOne<{ created_at: string }>('SELECT created_at FROM clients WHERE id = ?', [id]);
   res.json({
     id, name: safeName, config: result.config, type: result.type, subscriptionSlug,
     has_config: 1, created_at: created?.created_at,
-    expires_at: expiresAt, daily_limit_bytes: dailyLimitBytes, suspended_at: null, used_today: 0,
+    expires_at: expiresAt, expires_on: expiryCalendarDate(expiresAt),
+    daily_limit_bytes: dailyLimitBytes, suspended_at: null, used_today: 0,
     // Владелец — тот, кто сейчас создаёт клиента. Форма ответа должна совпадать
     // с GET /protocol/:protocolId: фронт кладёт созданного клиента прямо в
     // список, и без этого поля колонка «Created by» показывала прочерк до
@@ -260,16 +269,17 @@ router.put('/:id/limits', requireAdmin, validateBody(limitsSchema), async (req: 
   if (!client) return res.status(404).json({ error: 'Not found' });
   auditTarget(req, { id: client.id, name: client.name });
 
-  const { expiresInDays, dailyLimitMb } = req.body as z.infer<typeof limitsSchema>;
+  const { expiresInDays, expiryDate, dailyLimitMb } = req.body as z.infer<typeof limitsSchema>;
   auditDetails(req, {
     ...(expiresInDays !== undefined ? { expiresInDays } : {}),
+    ...(expiryDate !== undefined ? { expiryDate } : {}),
     ...(dailyLimitMb !== undefined ? { dailyLimitMb } : {}),
   });
 
   // Срок отсчитывается от «сейчас», а не от создания: продление на 7 дней
   // означает «ещё неделю с этого момента», это и ожидается от кнопки продления.
-  if (expiresInDays !== undefined) {
-    const expiresAt = expiresInDays > 0 ? Math.floor(Date.now() / 1000) + expiresInDays * 24 * 60 * 60 : null;
+  if (expiryDate !== undefined || expiresInDays !== undefined) {
+    const expiresAt = expiryTimestamp(expiryDate, expiresInDays);
     run('UPDATE clients SET expires_at = ? WHERE id = ?', [expiresAt, client.id]);
   }
   if (dailyLimitMb !== undefined) {
@@ -287,8 +297,8 @@ router.put('/:id/limits', requireAdmin, validateBody(limitsSchema), async (req: 
   }
 
   const fresh = queryOne<Client>('SELECT * FROM clients WHERE id = ?', [client.id]);
-  // Клиента могло не стать: выставили срок в прошлом — он удалён.
-  res.json(fresh ? { id: fresh.id, name: fresh.name, ...limitFields(fresh) } : { deleted: true });
+  if (!fresh) return res.status(404).json({ error: 'Not found' });
+  res.json({ id: fresh.id, name: fresh.name, ...limitFields(fresh) });
 });
 
 // GET /api/clients/:id/qr — QR для оригинального формата (.conf / VLESS URI)

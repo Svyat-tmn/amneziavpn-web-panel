@@ -134,6 +134,10 @@ export async function removeTelemtClient(server: Server, protocol: Protocol, pee
   assertContainerName(protocol.container_name);
   const cn = protocol.container_name;
   const f = '/opt/amnezia/telemt/users';
-  await execSudo(server, `grep -vE ${sh('^' + peerId + ' ')} ${f} > ${f}.tmp 2>/dev/null; mv ${f}.tmp ${f} 2>/dev/null || true`);
-  await execSudo(server, `docker restart ${cn} 2>/dev/null || true`);
+  const pattern = sh(`^[[:space:]]*${peerId.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&')}[[:space:]]*=`);
+  const update = await execSudo(server, `umask 077; grep -vE ${pattern} ${f} > ${f}.tmp;
+    code=$?; if [ "$code" -le 1 ]; then mv ${f}.tmp ${f}; else rm -f ${f}.tmp; exit "$code"; fi`);
+  if (update.code !== 0) throw new UserError('Не удалось обновить список клиентов Telemt');
+  const restart = await execSudo(server, `docker restart ${cn}`);
+  if (restart.code !== 0) throw new UserError('Не удалось перезапустить Telemt после отзыва клиента');
 }

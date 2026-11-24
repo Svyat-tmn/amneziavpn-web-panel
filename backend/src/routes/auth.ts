@@ -78,12 +78,13 @@ router.get('/me', authMiddleware, (req: Request, res: Response) => {
   const { username, role, clientLimit } = req.user!;
   // Лимиты, которые получат создаваемые пользователем клиенты. Выбирать их он
   // не может, но видеть должен — иначе клиент молча оказывается на два дня.
-  const defaults = queryOne<{ default_expiry_days: number; default_daily_limit_mb: number }>(
-    'SELECT default_expiry_days, default_daily_limit_mb FROM users WHERE id = ?', [req.user!.id],
+  const defaults = queryOne<{ default_expiry_days: number; default_expiry_date: string | null; default_daily_limit_mb: number }>(
+    'SELECT default_expiry_days, default_expiry_date, default_daily_limit_mb FROM users WHERE id = ?', [req.user!.id],
   );
   res.json({
     username, role, clientLimit,
     defaultExpiryDays: defaults?.default_expiry_days ?? 0,
+    defaultExpiryDate: defaults?.default_expiry_date ?? null,
     defaultDailyLimitMb: defaults?.default_daily_limit_mb ?? 0,
   });
 });

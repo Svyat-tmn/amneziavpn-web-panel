@@ -49,6 +49,7 @@ export interface Client {
   daily_limit_bytes?: number;
   /** Unix sec приостановки по суточному лимиту. NULL = активен. */
   suspended_at?: number | null;
+  peer_restore?: string | null;
   created_at?: string;
 }
 

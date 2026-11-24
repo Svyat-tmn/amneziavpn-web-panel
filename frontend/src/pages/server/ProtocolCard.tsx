@@ -371,7 +371,7 @@ function ProtocolCard({ protocol, server: _server, onDelete, drift, dragHandlePr
                             <button className="btn btn-outline btn-sm" onClick={() => setStatsClient(c)}
                               title="Статистика клиента: принято/отправлено за период и когда был онлайн">📊 Stats</button>
                             <button className="btn btn-outline btn-sm" onClick={() => setLimitsClient(c)}
-                              title="Срок действия и суточный лимит трафика: по сроку клиент удаляется, по лимиту — приостанавливается до новых суток">⏳ Лимиты</button>
+                              title="Срок действия и суточный лимит трафика">⏳ Лимиты</button>
                             {isXray && (
                               c.has_config
                                 ? <CopySubButton clientId={c.id} />
@@ -418,10 +418,7 @@ function ProtocolCard({ protocol, server: _server, onDelete, drift, dragHandlePr
           client={limitsClient}
           onClose={() => setLimitsClient(null)}
           onSaved={updated => {
-            // updated === null — срок выставили в прошлое, клиент уже удалён.
-            setClients(prev => updated
-              ? prev.map(x => x.id === updated.id ? updated : x)
-              : prev.filter(x => x.id !== limitsClient.id));
+            setClients(prev => prev.map(x => x.id === updated.id ? updated : x));
             setLimitsClient(null);
           }}
         />

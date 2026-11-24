@@ -68,7 +68,7 @@ export async function addWireGuardClient(server: Server, protocol: Protocol, _cl
     throw new UserError('WireGuard PSK not found on server. Reinstall the protocol.');
   }
 
-  const clientIp = await nextClientIp(server, WG_FLAVOR, SUBNET_PREFIX);
+  const clientIp = await nextClientIp(server, WG_FLAVOR, SUBNET_PREFIX, protocol.id);
   await addPeer(server, WG_FLAVOR, { clientPubKey, presharedKey, clientIp });
 
   const clientDns = await resolveClientDns(server);

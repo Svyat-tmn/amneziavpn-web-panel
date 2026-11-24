@@ -2,22 +2,17 @@ import { useState } from 'react';
 import { clientsApi, type ClientRecord } from '../../api';
 import LimitFields from './LimitFields';
 import { formatBytes } from './format';
+import { toDateInput } from './ExpiryDateField';
 
 interface Props {
   client: ClientRecord;
   onClose: () => void;
-  /** null = клиент удалён (срок выставлен в прошлое). */
-  onSaved: (updated: ClientRecord | null) => void;
+  onSaved: (updated: ClientRecord) => void;
 }
 
-// Срок отсчитывается от момента сохранения, а не от создания клиента: «7 дней»
-// в этой форме означает «ещё неделю с этого момента» — так и работает продление.
 export default function ClientLimitsModal({ client, onClose, onSaved }: Props) {
-  const currentDaysLeft = client.expires_at
-    ? Math.max(0, Math.ceil((client.expires_at - Date.now() / 1000) / 86400))
-    : 0;
-
-  const [expiresInDays, setExpiresInDays] = useState(String(currentDaysLeft));
+  const expired = !!client.expires_at && client.expires_at <= Date.now() / 1000;
+  const [expiryDate, setExpiryDate] = useState<string | undefined>();
   const [dailyLimitMb, setDailyLimitMb] = useState(String(Math.round(client.daily_limit_bytes / (1024 * 1024))));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -27,11 +22,10 @@ export default function ClientLimitsModal({ client, onClose, onSaved }: Props) {
     setError('');
     try {
       const r = await clientsApi.setLimits(client.id, {
-        expiresInDays: Number(expiresInDays) || 0,
+        expiryDate: expiryDate === undefined ? undefined : expiryDate || null,
         dailyLimitMb: Number(dailyLimitMb) || 0,
       });
-      if ('deleted' in r.data) onSaved(null);
-      else onSaved({ ...client, ...r.data });
+      onSaved({ ...client, ...r.data });
     } catch (e: any) {
       setError(e.response?.data?.error || 'Не удалось сохранить лимиты');
       setLoading(false);
@@ -44,7 +38,11 @@ export default function ClientLimitsModal({ client, onClose, onSaved }: Props) {
         <div className="modal-title">Лимиты · {client.name}</div>
         {error && <div className="notice notice-error" style={{ marginBottom: 12 }}>{error}</div>}
 
-        {!!client.suspended_at && (
+        {expired ? (
+          <div className="notice" style={{ marginBottom: 12 }}>
+            Срок действия истёк. Продлите его, чтобы восстановить доступ с прежним конфигом.
+          </div>
+        ) : !!client.suspended_at && (
           <div className="notice" style={{ marginBottom: 12 }}>
             Сейчас приостановлен: за сегодня израсходовано {formatBytes(client.used_today)}.
             Поднимите лимит — доступ вернётся сразу, ждать полуночи не нужно.
@@ -52,15 +50,11 @@ export default function ClientLimitsModal({ client, onClose, onSaved }: Props) {
         )}
 
         <LimitFields
-          expiresInDays={expiresInDays}
+          expiryDate={expiryDate ?? client.expires_on ?? (client.expires_at ? toDateInput(new Date((client.expires_at - 1) * 1000)) : '')}
           dailyLimitMb={dailyLimitMb}
-          onExpiryChange={setExpiresInDays}
+          onExpiryChange={setExpiryDate}
           onLimitChange={setDailyLimitMb}
         />
-
-        <div className="text-muted mono" style={{ fontSize: 10, marginBottom: 12 }}>
-          // срок отсчитывается заново от текущего момента
-        </div>
 
         <div className="modal-actions">
           <button className="btn btn-outline" onClick={onClose}>Отмена</button>

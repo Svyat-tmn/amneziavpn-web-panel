@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { expiryCalendarDate, expiryDateSchema, expiryTimestamp } from './expiry.js';
+import { removeAWG2Client, restoreAWG2Client } from './protocols/index.js';
+import { readContainerFile } from './protocols/common.js';
+import type { Client } from '../types.js';
+
+vi.mock('./protocols/index.js', () => ({ removeAWG2Client: vi.fn(), restoreAWG2Client: vi.fn() }));
+vi.mock('./protocols/common.js', () => ({ readContainerFile: vi.fn() }));
 
 process.env.DB_PATH = ':memory:';
 
@@ -51,6 +58,58 @@ describe('срок действия', () => {
     expect(limits.isExpired({ expires_at: now + 1 }, now)).toBe(false);
     expect(limits.isExpired({ expires_at: now }, now)).toBe(true);
     expect(limits.isExpired({ expires_at: now - 1 }, now)).toBe(true);
+  });
+
+  it('календарная дата включительна, невалидная дата отклоняется', () => {
+    expect(expiryDateSchema.safeParse('2026-02-29').success).toBe(false);
+    const timestamp = expiryTimestamp('2028-02-29');
+    expect(timestamp).toBe(new Date(2028, 2, 1).getTime() / 1000);
+    expect(expiryCalendarDate(timestamp)).toBe('2028-02-29');
+    expect(expiryTimestamp(null, 30)).toBeNull();
+  });
+
+  it('по сроку сохраняет конфиг и статистику и возвращает доступ после продления', async () => {
+    const config = '[Interface]\nAddress = 10.8.1.25/32\nPresharedKey = sample';
+    db.run('UPDATE clients SET expires_at = ?, config = ?, peer_id = ? WHERE id = ?', [now, config, 'key', 'c-1']);
+    db.run('INSERT INTO client_stats (client_id, ts, rx_bytes, tx_bytes) VALUES (?, ?, ?, ?)', ['c-1', now, 12, 5]);
+    const load = () => db.queryOne<Client>('SELECT * FROM clients WHERE id = ?', ['c-1'])!;
+
+    vi.mocked(removeAWG2Client).mockClear();
+    await Promise.all([limits.enforceLimitsForClient(load(), now), limits.enforceLimitsForClient(load(), now)]);
+    expect(removeAWG2Client).toHaveBeenCalledTimes(1);
+    expect(load().suspended_at).not.toBeNull();
+    expect(load().config).toBe(config);
+    expect(db.queryOne('SELECT rx_bytes FROM client_stats WHERE client_id = ?', ['c-1'])).toEqual({ rx_bytes: 12 });
+    await limits.enforceLimitsForClient(load(), now + 86400);
+    expect(restoreAWG2Client).not.toHaveBeenCalled();
+
+    db.run('UPDATE clients SET expires_at = NULL WHERE id = ?', ['c-1']);
+    await limits.enforceLimitsForClient(load(), now + 86400);
+    expect(restoreAWG2Client).toHaveBeenCalledWith(expect.anything(), expect.anything(),
+      { clientPubKey: 'key', clientIp: '10.8.1.25', presharedKey: 'sample' });
+    expect(load().suspended_at).toBeNull();
+  });
+
+  it('сохраняет данные импортированного AWG-пира до отключения и повторяет неудачный отзыв', async () => {
+    process.env.PANEL_ENCRYPTION_KEY = 'a'.repeat(64);
+    const peerKey = `${'A'.repeat(43)}=`;
+    const psk = `${'B'.repeat(43)}=`;
+    const load = () => db.queryOne<Client>('SELECT * FROM clients WHERE id = ?', ['c-1'])!;
+    db.run('UPDATE clients SET expires_at = ?, config = NULL, peer_id = ? WHERE id = ?', [now, peerKey, 'c-1']);
+    vi.mocked(readContainerFile).mockResolvedValueOnce(
+      `[Peer]\nPublicKey = ${peerKey}\nPresharedKey = ${psk}\nAllowedIPs = 10.8.1.25/32\n`,
+    );
+    vi.mocked(removeAWG2Client).mockRejectedValueOnce(new Error('SSH unavailable'));
+    await expect(limits.enforceLimitsForClient(load(), now)).rejects.toThrow('SSH unavailable');
+    expect(load().suspended_at).toBeNull();
+    expect(load().peer_restore).toMatch(/^enc:v1:/);
+    await limits.enforceLimitsForClient(load(), now);
+
+    db.run('UPDATE clients SET expires_at = NULL WHERE id = ?', ['c-1']);
+    await limits.enforceLimitsForClient(load(), now);
+    expect(restoreAWG2Client).toHaveBeenLastCalledWith(expect.anything(), expect.anything(),
+      { clientPubKey: peerKey, clientIp: '10.8.1.25', presharedKey: psk });
+    expect(load().config).toBeNull();
   });
 });
 
