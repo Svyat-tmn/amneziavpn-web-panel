@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import QRCode from 'qrcode';
 import { z } from 'zod';
 import { query, queryOne, run } from '../services/db.js';
@@ -224,7 +224,7 @@ router.post('/', validateBody(createClientSchema), async (req: Request, res: Res
   else if (protocol.type === 'telemt')    result = await addTelemtClient(server, protocol, safeName);
   else return res.status(400).json({ error: `Unsupported protocol: ${protocol.type}` });
 
-  const id = uuidv4();
+  const id = randomUUID();
   const storedConfig = result.configJson
     ? `${result.config}\n---AMNEZIA_JSON---\n${result.configJson}`
     : result.config;

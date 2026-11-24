@@ -4,7 +4,7 @@
 // поэтому пользователей заводит администратор.
 import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { query, queryOne, run } from '../services/db.js';
 import { authMiddleware, requireAdmin } from '../middleware/auth.js';
@@ -81,7 +81,7 @@ router.post('/', validateBody(createSchema), async (req: Request, res: Response)
     return res.status(409).json({ error: 'Пользователь с таким именем уже существует' });
   }
 
-  const id = uuidv4();
+  const id = randomUUID();
   const hash = await bcrypt.hash(password, 10);
   run(`INSERT INTO users (id, username, password_hash, role, client_limit, default_expiry_days, default_expiry_date, default_daily_limit_mb)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,

@@ -3,13 +3,12 @@
 # tree. Silent no-op when nothing matches. On gate failure, emits
 # decision:"block" JSON so Claude sees the gate output as feedback.
 #
-# Project has no test runner — the gate is `npm run typecheck` per package:
-#   - backend/src/**   → cd backend  && npm run typecheck
+#   - backend/src/**   → cd backend  && npm run typecheck && npm test
 #   - frontend/src/**  → cd frontend && npm run typecheck
 #
 # Node may not be installed on the host (it runs inside containers). If a local
-# `npx tsc` is unavailable we fall back to typechecking inside the running
-# backend container; for the frontend we skip with a note rather than block.
+# `npx tsc` is unavailable we build the backend test image and run it once.
+# For the frontend we skip with a note rather than block.
 
 set -uo pipefail
 
@@ -48,11 +47,12 @@ typecheck() {
       ( cd "$dir" && npx --no-install tsc --noEmit ) > "$log" 2>&1
     fi
     echo $? > "$rc"
-  elif [ "$dir" = "backend" ] && command -v docker >/dev/null 2>&1 \
-       && docker ps --format '{{.Names}}' | grep -q '^amnezia-panel-backend$'; then
-    # Host has no node — typecheck the host sources inside the backend container.
-    docker cp backend/src amnezia-panel-backend:/app/ >/dev/null 2>&1
-    docker exec amnezia-panel-backend sh -c 'cd /app && npx tsc --noEmit && npm test --silent' > "$log" 2>&1
+  elif [ "$dir" = "backend" ] && command -v docker >/dev/null 2>&1; then
+    local image
+    (
+      image="$(docker build --quiet --target test backend)" &&
+        docker run --rm "$image"
+    ) > "$log" 2>&1
     echo $? > "$rc"
   else
     echo "skipped: no local node/npx and no container fallback for $dir" > "$log"

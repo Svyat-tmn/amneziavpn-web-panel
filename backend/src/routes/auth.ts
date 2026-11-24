@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { query, queryOne, run } from '../services/db.js';
@@ -37,7 +37,7 @@ router.post('/setup', validateBody(credentialsSchema), async (req: Request, res:
   // Первый пользователь — администратор без лимита на клиентов: больше выдать
   // эти права некому.
   run("INSERT INTO users (id, username, password_hash, role, client_limit) VALUES (?, ?, ?, 'admin', 0)",
-    [uuidv4(), username, hash]);
+    [randomUUID(), username, hash]);
   req.auditActor = username;
   auditTarget(req, { name: username });
   res.json({ ok: true });

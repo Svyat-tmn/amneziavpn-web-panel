@@ -1,9 +1,9 @@
 import type { Request, Response, NextFunction } from 'express';
-import type { ZodSchema } from 'zod';
+import type { ZodType } from 'zod';
 
 // Express middleware-фабрика для валидации req.body через zod-схему.
 // Если данные валидны — req.body заменяется на parsed (с применёнными default'ами).
-export function validateBody<T>(schema: ZodSchema<T>) {
+export function validateBody(schema: ZodType) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {

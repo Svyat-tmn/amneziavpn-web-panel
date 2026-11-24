@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { query, queryOne, run } from '../services/db.js';
 import { encrypt } from '../services/crypto.js';
@@ -46,7 +46,7 @@ const importSchema = z.object({
   type: z.enum(['awg2', 'wireguard', 'xray', 'telemt']),
   containerName: z.string().min(1).max(128),
   port: z.coerce.number().int().min(1).max(65535).nullable().optional(),
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
   clients: z.array(z.object({
     clientId: z.string(),
     name: z.string(),
@@ -62,7 +62,7 @@ router.get('/', (_req, res) => {
 // POST /api/servers
 router.post('/', validateBody(serverSchema), (req: Request, res: Response) => {
   const { name, host, port, username, auth_type, host_fingerprint, password, private_key } = req.body;
-  const id = uuidv4();
+  const id = randomUUID();
   run(
     'INSERT INTO servers (id, name, host, port, username, auth_type, host_fingerprint, password, private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [id, name, host, port, username, auth_type, host_fingerprint, encrypt(password) || null, encrypt(private_key) || null]
@@ -217,7 +217,7 @@ router.post('/:id/import-protocol', validateBody(importSchema), (req: Request, r
 
   // name не пишем — см. комментарий в routes/protocols.ts: заголовок выводится
   // из type + config, а снимок имени в БД только вносил путаницу.
-  const protocolId = uuidv4();
+  const protocolId = randomUUID();
   run(
     'INSERT INTO protocols (id, server_id, type, name, port, container_name, status, config) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     [protocolId, server.id, type, null, port ?? null, containerName, 'running', JSON.stringify(config || {})]
@@ -228,7 +228,7 @@ router.post('/:id/import-protocol', validateBody(importSchema), (req: Request, r
 
   for (const cl of clients) {
     if (!cl.clientId || !cl.name) continue;
-    const clientId = uuidv4();
+    const clientId = randomUUID();
     let clientConfig: string | null = null;
 
     if (type === 'xray' && config) {

@@ -67,11 +67,12 @@ description: Behavioral guidelines to reduce common LLM coding mistakes. Use whe
 
 ```bash
 # 1. Типы и тесты (backend)
-docker exec amnezia-panel-backend sh -c 'cd /app && npx tsc --noEmit && npm test'
+docker build --target test -t amnezia-panel-backend-test backend
+docker run --rm amnezia-panel-backend-test
 
 # 2. Типы (frontend) — на хосте нет node, гоняем в одноразовом контейнере
-docker run --rm -v $PWD/frontend:/src:ro -w /app node:20-alpine sh -c \
-  'cp -r /src/. /app && npm install --silent && npx tsc --noEmit'
+docker run --rm -v $PWD/frontend:/src:ro -w /app node:22-alpine sh -c \
+  'cp -r /src/. /app && npm ci --silent && npx tsc --noEmit'
 
 # 3. Деплой — правка в рабочем дереве это ещё не работающая система
 docker compose up -d --build backend frontend

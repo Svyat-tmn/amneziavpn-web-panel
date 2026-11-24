@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { query, queryOne, run } from '../services/db.js';
 import { authMiddleware, requireAdmin } from '../middleware/auth.js';
@@ -29,7 +29,7 @@ router.use(requireAdmin);
 
 const installSchema = z.object({
   type: z.enum(['awg2', 'wireguard', 'xray', 'telemt']),
-  options: z.record(z.unknown()).optional().default({}),
+  options: z.record(z.string(), z.unknown()).optional().default({}),
 });
 
 router.get('/server/:serverId', (req, res) => {
@@ -86,7 +86,7 @@ router.post('/server/:serverId', validateBody(installSchema), async (req: Reques
   else if (type === 'telemt')    result = await installTelemt(server, options);
   else                            result = await installWireGuard(server, options);
 
-  const id = uuidv4();
+  const id = randomUUID();
   // name не пишем: это был снимок имени на момент установки, он не обновлялся, и
   // после переименования протокола карточки показывали устаревшее название.
   // Заголовок выводится из type + config на фронте (frontend/src/protocols.ts).
