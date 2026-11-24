@@ -1,8 +1,13 @@
+import { createHash } from 'node:crypto';
 import { NodeSSH } from 'node-ssh';
 import { decrypt } from './crypto.js';
+import { queryOne } from './db.js';
+import { UserError } from './errors.js';
 import type { Server, ExecResult } from '../types.js';
 
-const connections = new Map<string, NodeSSH>();
+export const SSH_HOST_FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/;
+
+const connections = new Map<string, Promise<NodeSSH>>();
 
 // Сообщения, по которым считаем что SSH-канал умер и нужно переподключиться.
 const RECONNECT_PATTERNS = [
@@ -22,28 +27,69 @@ function shouldReconnect(err: unknown): boolean {
 
 export async function getConnection(server: Server): Promise<NodeSSH> {
   const key = server.id;
-  const cached = connections.get(key);
-  if (cached) return cached;
+  // A worker may hold a server snapshot from before an edit or key rotation.
+  const current = queryOne<Server>('SELECT * FROM servers WHERE id = ?', [key]);
+  if (!current) throw new UserError('SSH-сервер удалён из панели');
+  if (current.host !== server.host || current.port !== server.port ||
+      current.host_fingerprint !== server.host_fingerprint) {
+    throw new UserError('Настройки SSH изменились. Повторите операцию');
+  }
+  const fingerprint = current.host_fingerprint;
+  if (!fingerprint || !SSH_HOST_FINGERPRINT.test(fingerprint)) {
+    throw new UserError('Укажите отпечаток SSH-хоста в настройках сервера');
+  }
+  let pending = connections.get(key);
+  if (!pending) {
+    pending = connect(current, fingerprint);
+    connections.set(key, pending);
+  }
+  try {
+    const ssh = await pending;
+    if (connections.get(key) !== pending) {
+      throw new UserError('SSH-соединение сброшено. Повторите операцию');
+    }
+    return ssh;
+  } catch (error) {
+    if (connections.get(key) === pending) connections.delete(key);
+    throw error;
+  }
+}
 
+async function connect(server: Server, fingerprint: string): Promise<NodeSSH> {
   const ssh = new NodeSSH();
+  let hostKeyRejected = false;
   const config: Parameters<NodeSSH['connect']>[0] = {
     host: server.host,
     port: server.port || 22,
     username: server.username,
+    hostVerifier: (key: Buffer) => {
+      const digest = createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
+      hostKeyRejected = `SHA256:${digest}` !== fingerprint;
+      return !hostKeyRejected;
+    },
     readyTimeout: 15000,
     // Пингуем канал каждые 30s; если 3 пинга подряд не получили ответа — рвём.
     keepaliveInterval: 30000,
     keepaliveCountMax: 3,
   };
 
-  if (server.auth_type === 'key' && server.private_key) {
-    config.privateKey = decrypt(server.private_key) as string;
+  if (server.auth_type === 'key') {
+    const privateKey = decrypt(server.private_key);
+    if (!privateKey) throw new UserError('Укажите приватный SSH-ключ для входа на сервер');
+    config.privateKey = privateKey;
   } else {
     config.password = decrypt(server.password) as string;
   }
 
-  await ssh.connect(config);
-  connections.set(key, ssh);
+  try {
+    await ssh.connect(config);
+  } catch (error) {
+    ssh.dispose();
+    if (hostKeyRejected) {
+      throw new UserError('Отпечаток SSH-хоста не совпадает. Проверьте ключ сервера по доверенному каналу');
+    }
+    throw error;
+  }
   return ssh;
 }
 
@@ -72,11 +118,9 @@ export async function execSudo(server: Server, command: string): Promise<ExecRes
 }
 
 export function disconnect(serverId: string): void {
-  const conn = connections.get(serverId);
-  if (conn) {
-    try { conn.dispose(); } catch { /* ignore */ }
-    connections.delete(serverId);
-  }
+  const pending = connections.get(serverId);
+  connections.delete(serverId);
+  if (pending) void pending.then(ssh => ssh.dispose()).catch(() => {});
 }
 
 export function disconnectAll(): void {

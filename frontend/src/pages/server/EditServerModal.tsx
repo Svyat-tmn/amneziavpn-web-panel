@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { serversApi, type ServerRecord } from '../../api';
+import HostFingerprintField from './HostFingerprintField';
 
 interface Props {
   server: ServerRecord;
@@ -13,6 +14,7 @@ interface FormState {
   port: number;
   username: string;
   auth_type: 'password' | 'key';
+  host_fingerprint: string;
   password: string;
   private_key: string;
 }
@@ -24,6 +26,7 @@ export default function EditServerModal({ server, onClose, onSaved }: Props) {
     port: server.port,
     username: server.username,
     auth_type: server.auth_type || 'password',
+    host_fingerprint: server.host_fingerprint ?? '',
     password: '',
     private_key: '',
   });
@@ -65,6 +68,7 @@ export default function EditServerModal({ server, onClose, onSaved }: Props) {
               <input className="input input-mono" type="number" value={form.port} onChange={e => set('port', +e.target.value)} />
             </div>
           </div>
+          <HostFingerprintField value={form.host_fingerprint} onChange={value => set('host_fingerprint', value)} />
           <div className="input-group">
             <label className="input-label">Username</label>
             <input className="input input-mono" value={form.username} onChange={e => set('username', e.target.value)} />
@@ -83,15 +87,14 @@ export default function EditServerModal({ server, onClose, onSaved }: Props) {
             </div>
           ) : (
             <div className="input-group">
-              <label className="input-label">Private Key (PEM) <span className="text-muted">(оставьте пустым чтобы не менять)</span></label>
+              <label className="input-label">SSH Private Key <span className="text-muted">(оставьте пустым чтобы не менять)</span></label>
               <textarea className="input input-mono" rows={5} placeholder="оставьте пустым, чтобы не менять" value={form.private_key} onChange={e => set('private_key', e.target.value)} />
             </div>
           )}
         </div>
         <div className="modal-actions">
           <button className="btn btn-outline" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={submit} disabled={loading}
-            title="Сохранить доступ к серверу. Панель проверит SSH перед записью">
+          <button className="btn btn-primary" onClick={submit} disabled={loading || !form.host_fingerprint.trim()}>
             {loading ? <><span className="spinner" /> Saving…</> : '✓ Save'}
           </button>
         </div>

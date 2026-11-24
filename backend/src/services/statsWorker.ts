@@ -39,6 +39,7 @@ interface ProtocolWithServer extends Protocol {
   s_port: number;
   s_username: string;
   s_auth_type: 'password' | 'key';
+  s_host_fingerprint: string | null;
   s_password: string | null;
   s_private_key: string | null;
 }
@@ -86,7 +87,8 @@ async function pollOnce(): Promise<void> {
     SELECT
       p.id, p.server_id, p.type, p.name, p.container_name, p.port, p.config, p.status,
       s.id AS s_id, s.host AS s_host, s.port AS s_port, s.username AS s_username,
-      s.auth_type AS s_auth_type, s.password AS s_password, s.private_key AS s_private_key
+      s.auth_type AS s_auth_type, s.host_fingerprint AS s_host_fingerprint,
+      s.password AS s_password, s.private_key AS s_private_key
     FROM protocols p
     JOIN servers s ON s.id = p.server_id
     WHERE p.status = 'running' AND p.type IN ('awg2', 'wireguard', 'xray', 'telemt')
@@ -96,6 +98,7 @@ async function pollOnce(): Promise<void> {
     const server: Server = {
       id: row.s_id, name: '', host: row.s_host, port: row.s_port, username: row.s_username,
       auth_type: row.s_auth_type, password: row.s_password, private_key: row.s_private_key,
+      host_fingerprint: row.s_host_fingerprint,
     };
 
     let peers: PeerStats[] | null;

@@ -8,11 +8,12 @@ import { revokeProtocolGrants } from '../services/access.js';
 import { cacheDnsStatus } from '../services/serverProbe.js';
 import { auditTarget, auditDetails } from '../middleware/audit.js';
 import { validateBody } from '../middleware/validate.js';
-import { testConnection, disconnect } from '../services/ssh.js';
+import { testConnection, disconnect, SSH_HOST_FINGERPRINT } from '../services/ssh.js';
 import { listAmneziaContainers, ensureDocker, updateAndRebootHost, scanExistingProtocols, installDns, removeDns, isDnsRunning, getDnsDrift } from '../services/protocols/index.js';
 import { assertContainerName, assertPort } from '../services/shell.js';
 import { createSubscription, getVpsHost } from '../services/subscription.js';
 import { logger } from '../services/logger.js';
+import { isUserError } from '../services/errors.js';
 import type { Server, Protocol, ProtocolType } from '../types.js';
 
 const router = Router();
@@ -36,6 +37,7 @@ const serverSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).optional().default(22),
   username: z.string().min(1).max(128),
   auth_type: z.enum(['password', 'key']).optional().default('password'),
+  host_fingerprint: z.string().trim().regex(SSH_HOST_FINGERPRINT, 'Укажите отпечаток SSH-хоста в формате SHA256:…'),
   password: z.string().optional().nullable(),
   private_key: z.string().optional().nullable(),
 });
@@ -53,22 +55,22 @@ const importSchema = z.object({
 
 // GET /api/servers
 router.get('/', (_req, res) => {
-  const servers = query<Server>('SELECT id, name, host, port, username, auth_type, created_at FROM servers');
+  const servers = query<Server>('SELECT id, name, host, port, username, auth_type, host_fingerprint, created_at FROM servers');
   res.json(servers);
 });
 
 // POST /api/servers
 router.post('/', validateBody(serverSchema), (req: Request, res: Response) => {
-  const { name, host, port, username, auth_type, password, private_key } = req.body;
+  const { name, host, port, username, auth_type, host_fingerprint, password, private_key } = req.body;
   const id = uuidv4();
   run(
-    'INSERT INTO servers (id, name, host, port, username, auth_type, password, private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [id, name, host, port, username, auth_type, encrypt(password) || null, encrypt(private_key) || null]
+    'INSERT INTO servers (id, name, host, port, username, auth_type, host_fingerprint, password, private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, name, host, port, username, auth_type, host_fingerprint, encrypt(password) || null, encrypt(private_key) || null]
   );
   auditTarget(req, { id, name });
   // Хост и способ входа — да, пароль и ключ — никогда.
   auditDetails(req, { host, port, username, authType: auth_type });
-  res.json({ id, name, host, port, username, auth_type });
+  res.json({ id, name, host, port, username, auth_type, host_fingerprint });
 });
 
 // PUT /api/servers/:id
@@ -76,7 +78,7 @@ router.put('/:id', validateBody(serverSchema), (req: Request, res: Response) => 
   const server = loadServer(req, res);
   if (!server) return;
 
-  const { name, host, port, username, auth_type, password, private_key } = req.body;
+  const { name, host, port, username, auth_type, host_fingerprint, password, private_key } = req.body;
 
   // Пустое поле = «не менять». Форма редактирования НИКОГДА не подставляет
   // текущий секрет в input (его незачем отдавать в браузер), поэтому раньше
@@ -88,15 +90,15 @@ router.put('/:id', validateBody(serverSchema), (req: Request, res: Response) => 
       : (current ?? null);
 
   run(
-    'UPDATE servers SET name=?, host=?, port=?, username=?, auth_type=?, password=?, private_key=? WHERE id=?',
-    [name, host, port ?? server.port, username, auth_type ?? server.auth_type,
+    'UPDATE servers SET name=?, host=?, port=?, username=?, auth_type=?, host_fingerprint=?, password=?, private_key=? WHERE id=?',
+    [name, host, port, username, auth_type, host_fingerprint,
      keep(password, server.password), keep(private_key, server.private_key), req.params.id]
   );
 
   // Сбрасываем SSH-соединение чтобы подключиться с новыми данными
   disconnect(req.params.id);
 
-  res.json({ id: req.params.id, name, host, port: port ?? server.port, username, auth_type: auth_type ?? server.auth_type });
+  res.json({ id: req.params.id, name, host, port, username, auth_type, host_fingerprint });
 });
 
 // DELETE /api/servers/:id
@@ -189,6 +191,7 @@ router.post('/:id/scan-protocols', async (req, res) => {
     const found = await scanExistingProtocols(server);
     res.json({ found });
   } catch (e) {
+    if (isUserError(e)) throw e;
     logger.error({ err: e }, 'scan-protocols failed');
     res.status(500).json({ error: 'Failed to scan protocols' });
   }

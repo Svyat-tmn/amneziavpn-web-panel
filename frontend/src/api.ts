@@ -40,6 +40,7 @@ export interface ServerRecord {
   port: number;
   username: string;
   auth_type: 'password' | 'key';
+  host_fingerprint: string | null;
   created_at?: string;
 }
 

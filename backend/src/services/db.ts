@@ -50,6 +50,7 @@ export async function getDb(): Promise<Db> {
   // поведение уже написанного кода (он удаляет связанные строки вручную).
 
   initSchema();
+  addColumnIfMissing('servers', 'host_fingerprint', 'host_fingerprint TEXT');
   migrateEncryption();
   migrateClientPeerIds();
   migrateAccessControl();
@@ -232,6 +233,7 @@ function initSchema(): void {
       port INTEGER DEFAULT 22,
       username TEXT NOT NULL,
       auth_type TEXT NOT NULL DEFAULT 'password',
+      host_fingerprint TEXT,
       password TEXT,
       private_key TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP

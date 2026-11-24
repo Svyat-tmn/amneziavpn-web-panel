@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { serversApi, type ServerRecord } from '../api';
+import HostFingerprintField from './server/HostFingerprintField';
 
 interface AddServerForm {
   name: string;
@@ -8,6 +9,7 @@ interface AddServerForm {
   port: number;
   username: string;
   auth_type: 'password' | 'key';
+  host_fingerprint: string;
   password: string;
   private_key: string;
 }
@@ -18,7 +20,10 @@ interface AddServerModalProps {
 }
 
 function AddServerModal({ onClose, onAdded }: AddServerModalProps) {
-  const [form, setForm] = useState<AddServerForm>({ name: '', host: '', port: 22, username: 'root', auth_type: 'password', password: '', private_key: '' });
+  const [form, setForm] = useState<AddServerForm>({
+    name: '', host: '', port: 22, username: 'root', auth_type: 'key',
+    host_fingerprint: '', password: '', private_key: '',
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const navigate = useNavigate();
@@ -67,6 +72,7 @@ function AddServerModal({ onClose, onAdded }: AddServerModalProps) {
               <input className="input input-mono" type="number" value={form.port} onChange={e => set('port', +e.target.value)} />
             </div>
           </div>
+          <HostFingerprintField value={form.host_fingerprint} onChange={value => set('host_fingerprint', value)} />
           <div className="input-group">
             <label className="input-label">Username</label>
             <input className="input input-mono" value={form.username} onChange={e => set('username', e.target.value)} />
@@ -85,8 +91,8 @@ function AddServerModal({ onClose, onAdded }: AddServerModalProps) {
             </div>
           ) : (
             <div className="input-group">
-              <label className="input-label">Private Key (PEM)</label>
-              <textarea className="input input-mono" rows={5} placeholder="-----BEGIN RSA PRIVATE KEY-----" value={form.private_key} onChange={e => set('private_key', e.target.value)} />
+              <label className="input-label">SSH Private Key</label>
+              <textarea className="input input-mono" rows={5} spellCheck={false} value={form.private_key} onChange={e => set('private_key', e.target.value)} />
             </div>
           )}
           <div className="notice notice-info" style={{ fontSize: 11 }}>
@@ -95,7 +101,7 @@ function AddServerModal({ onClose, onAdded }: AddServerModalProps) {
         </div>
         <div className="modal-actions">
           <button className="btn btn-outline" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={submit} disabled={loading}
+          <button className="btn btn-primary" onClick={submit} disabled={loading || !form.host_fingerprint.trim()}
             title="Подключиться по SSH и сразу поискать на сервере уже стоящие контейнеры Amnezia">
             {loading ? <><span className="spinner" /> Adding…</> : 'Add & Scan Server'}
           </button>

@@ -12,6 +12,7 @@ export interface Server {
   port: number;
   username: string;
   auth_type: AuthType;
+  host_fingerprint?: string | null;
   password?: string | null;
   private_key?: string | null;
   created_at?: string;
